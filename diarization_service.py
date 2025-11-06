@@ -7,6 +7,7 @@ Flask сервис для диаризации аудио
 import os
 import json
 import tempfile
+import torch
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from functools import wraps
@@ -79,6 +80,31 @@ ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'flac', 'wma'}
 # Глобальная переменная для хранения загруженной модели
 pipeline = None
 
+# Определение устройства для вычислений
+def get_device():
+    """Определяет наилучшее доступное устройство для вычислений"""
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"🚀 CUDA available: {gpu_name} ({gpu_memory:.1f} GB)")
+        
+        # Проверяем доступную память
+        torch.cuda.empty_cache()
+        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+        free_memory_gb = free_memory / (1024**3)
+        print(f"💾 GPU memory available: {free_memory_gb:.1f} GB")
+        
+        if free_memory_gb < 2.0:
+            print("⚠️  Warning: Less than 2GB GPU memory available, performance may be limited")
+        
+        return device
+    else:
+        print("⚡ CUDA not available, using CPU")
+        return torch.device('cpu')
+
+DEVICE = get_device()
+
 
 def load_pipeline():
     """Загрузка модели при старте сервиса"""
@@ -114,7 +140,8 @@ def load_pipeline():
                 print("Found config.yaml and pytorch_model.bin")
                 
             pipeline = Pipeline.from_pretrained(abs_model_path)
-            print("✓ Model loaded from local path")
+            pipeline = pipeline.to(DEVICE)
+            print(f"✓ Model loaded from local path and moved to {DEVICE}")
         else:
             # Загружаем из HuggingFace (используется кэш если модель уже скачана)
             hf_token = os.getenv('HF_TOKEN')
@@ -131,7 +158,8 @@ def load_pipeline():
             
             # Загружаем без явной передачи токена - будет использован из env или кэша
             pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
-            print("✓ Model loaded from HuggingFace cache")
+            pipeline = pipeline.to(DEVICE)
+            print(f"✓ Model loaded from HuggingFace cache and moved to {DEVICE}")
         
         return pipeline
     
@@ -176,13 +204,81 @@ def health():
     """Проверка здоровья сервиса"""
     try:
         model_status = "loaded" if pipeline is not None else "not loaded"
+        
+        # Информация о CUDA
+        cuda_info = {
+            'available': torch.cuda.is_available(),
+            'current_device': str(DEVICE),
+        }
+        
+        if torch.cuda.is_available():
+            cuda_info.update({
+                'device_count': torch.cuda.device_count(),
+                'device_name': torch.cuda.get_device_name(0),
+                'memory_total_gb': round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2),
+                'memory_allocated_gb': round(torch.cuda.memory_allocated(0) / (1024**3), 2),
+                'memory_cached_gb': round(torch.cuda.memory_reserved(0) / (1024**3), 2)
+            })
+        
         return jsonify({
             'status': 'healthy',
-            'model': model_status
+            'model': model_status,
+            'device': cuda_info,
+            'torch_version': torch.__version__
         }), 200
     except Exception as e:
         return jsonify({
             'status': 'unhealthy',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/system', methods=['GET'])
+def system_info():
+    """Детальная информация о системе и CUDA"""
+    try:
+        system_info = {
+            'python_version': f"{os.sys.version_info.major}.{os.sys.version_info.minor}.{os.sys.version_info.micro}",
+            'torch_version': torch.__version__,
+            'device': str(DEVICE),
+            'cuda': {
+                'available': torch.cuda.is_available(),
+                'version': torch.version.cuda if torch.cuda.is_available() else None,
+            }
+        }
+        
+        if torch.cuda.is_available():
+            system_info['cuda'].update({
+                'device_count': torch.cuda.device_count(),
+                'current_device': torch.cuda.current_device(),
+                'devices': []
+            })
+            
+            for i in range(torch.cuda.device_count()):
+                device_props = torch.cuda.get_device_properties(i)
+                device_info = {
+                    'id': i,
+                    'name': device_props.name,
+                    'major': device_props.major,
+                    'minor': device_props.minor,
+                    'total_memory_gb': round(device_props.total_memory / (1024**3), 2),
+                    'multiprocessor_count': device_props.multi_processor_count
+                }
+                
+                # Только для текущего устройства получаем использование памяти
+                if i == torch.cuda.current_device():
+                    device_info.update({
+                        'memory_allocated_gb': round(torch.cuda.memory_allocated(i) / (1024**3), 2),
+                        'memory_cached_gb': round(torch.cuda.memory_reserved(i) / (1024**3), 2),
+                        'memory_free_gb': round((device_props.total_memory - torch.cuda.memory_reserved(i)) / (1024**3), 2)
+                    })
+                
+                system_info['cuda']['devices'].append(device_info)
+        
+        return jsonify(system_info), 200
+        
+    except Exception as e:
+        return jsonify({
             'error': str(e)
         }), 500
 
@@ -229,10 +325,20 @@ def diarize():
             file.save(tmp.name)
         
         # Выполнение диаризации
-        print(f"Processing file: {file.filename} ({file_size / 1024:.2f} KB)")
+        import time
+        print(f"🎵 Processing file: {file.filename} ({file_size / 1024:.2f} KB) on {DEVICE}")
         
+        # Очищаем GPU кэш перед обработкой
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        start_time = time.time()
         model = load_pipeline()
+        
+        # Засекаем время диаризации
+        diarization_start = time.time()
         diarization = model(temp_file)
+        diarization_time = time.time() - diarization_start
         
         # Формирование результата
         result = []
@@ -243,12 +349,16 @@ def diarize():
                 "speaker": speaker
             })
         
-        print(f"✓ Diarization completed: {len(result)} segments")
+        total_time = time.time() - start_time
+        print(f"✓ Diarization completed: {len(result)} segments in {diarization_time:.2f}s (total: {total_time:.2f}s)")
         
         return jsonify({
             'success': True,
             'segments': result,
-            'total_segments': len(result)
+            'total_segments': len(result),
+            'processing_time_seconds': round(diarization_time, 2),
+            'total_time_seconds': round(total_time, 2),
+            'device': str(DEVICE)
         }), 200
     
     except Exception as e:
