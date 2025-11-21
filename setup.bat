@@ -20,6 +20,31 @@ echo Python found:
 python --version
 echo.
 
+:: Создаем виртуальное окружение если его нет
+if not exist "venv" (
+    echo Creating virtual environment...
+    python -m venv venv
+    if %errorlevel% neq 0 (
+        echo ERROR: Failed to create virtual environment!
+        pause
+        exit /b 1
+    )
+    echo Virtual environment created
+) else (
+    echo Virtual environment already exists
+)
+echo.
+
+:: Активируем виртуальное окружение
+echo Activating virtual environment...
+call venv\Scripts\activate.bat
+if %errorlevel% neq 0 (
+    echo ERROR: Failed to activate virtual environment!
+    pause
+    exit /b 1
+)
+echo.
+
 :: Устанавливаем зависимости
 echo Installing Python dependencies...
 pip install -r requirements.txt

@@ -6,6 +6,13 @@ echo ========================================
 :: Переходим в папку сервиса
 cd /d %~dp0
 
+:: Активируем виртуальное окружение если есть
+if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
+) else if exist ".venv\Scripts\activate.bat" (
+    call .venv\Scripts\activate.bat
+)
+
 :: Устанавливаем переменные окружения для разработки
 set FLASK_ENV=development
 set FLASK_DEBUG=1

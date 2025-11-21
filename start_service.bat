@@ -6,6 +6,21 @@ echo ========================================
 :: Переходим в папку сервиса
 cd /d %~dp0
 
+:: Проверяем и активируем виртуальное окружение
+if exist "venv\Scripts\activate.bat" (
+    echo Activating virtual environment...
+    call venv\Scripts\activate.bat
+    echo Virtual environment activated
+) else if exist ".venv\Scripts\activate.bat" (
+    echo Activating virtual environment...
+    call .venv\Scripts\activate.bat
+    echo Virtual environment activated
+) else (
+    echo WARNING: Virtual environment not found
+    echo Using system Python
+)
+echo.
+
 :: Проверяем наличие Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
